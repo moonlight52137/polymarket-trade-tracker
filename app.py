@@ -455,7 +455,7 @@ def multi_analyze():
         try:
             from script import run_analysis_by_condition_id
             
-            chart_file, report_file, trades_file, error = run_analysis_by_condition_id(
+            chart_file, report_file, trades_file, error, timeline_file = run_analysis_by_condition_id(
                 condition_id=condition_id,
                 user_address=address,
                 market_title=market_title,
@@ -493,6 +493,7 @@ def multi_analyze():
                 'chart': os.path.basename(chart_file) if chart_file else None,
                 'report': os.path.basename(report_file) if report_file else None,
                 'trades': os.path.basename(trades_file) if trades_file else None,
+                'timeline': os.path.basename(timeline_file) if timeline_file else None,
                 'report_content': report_content
             }
             
@@ -571,7 +572,7 @@ def query():
     # 在后台线程执行查询
     def run_task():
         try:
-            chart_file, report_file, trades_file, error = run_analysis(
+            chart_file, report_file, trades_file, error, timeline_file = run_analysis(
                 market_query=market,
                 user_address=address,
                 resolved_arg='AUTO',
@@ -605,6 +606,7 @@ def query():
                 'chart': os.path.basename(chart_file) if chart_file else None,
                 'report': os.path.basename(report_file) if report_file else None,
                 'trades': os.path.basename(trades_file) if trades_file else None,
+                'timeline': os.path.basename(timeline_file) if timeline_file else None,
                 'report_content': report_content
             }
             

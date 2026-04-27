@@ -219,6 +219,101 @@ SEARCH_URL = "https://gamma-api.polymarket.com/public-search"
 TRADES_URL = "https://data-api.polymarket.com/trades"
 PRICE_RESOLUTION_THRESHOLD = 0.5
 
+
+def fetch_price_history(condition_id):
+    """获取市场历史价格曲线 (CLOB API + Gamma API).
+
+    1. 从 Gamma API 获取市场的 clobTokenIds (Yes 代币 ID)
+    2. 从 CLOB API /prices-history 获取价格历史
+    返回 [{t: unix秒, p: 价格¢}]
+    失败时返回空列表。
+    """
+    if not condition_id:
+        return []
+    try:
+        # Step 1: 从 Gamma API 获取市场的 token ID
+        gamma_url = f"https://gamma-api.polymarket.com/markets?condition_id={condition_id}"
+        gamma_resp = requests.get(gamma_url, timeout=15)
+        gamma_resp.raise_for_status()
+        gamma_data = gamma_resp.json()
+        if not isinstance(gamma_data, list) or len(gamma_data) == 0:
+            return []
+
+        market = gamma_data[0]
+        clob_ids = market.get("clobTokenIds", [])
+        if not clob_ids:
+            return []
+        token_id = clob_ids[0]  # Yes 代币 ID
+
+        # Step 2: 从 CLOB API 获取价格历史 (最大支持 15 天区间)
+        # 先获取所有历史数据
+        history_all = []
+        fidelity = 3600  # 1小时间隔
+        # 往前查 90 天
+        end_dt = datetime.datetime.now(datetime.timezone.utc)
+        start_dt = end_dt - datetime.timedelta(days=90)
+        segments = []
+        # 按 15 天分段
+        seg_start = start_dt
+        while seg_start < end_dt:
+            seg_end = min(seg_start + datetime.timedelta(days=14), end_dt)
+            segments.append((seg_start, seg_end))
+            seg_start = seg_end + datetime.timedelta(seconds=1)
+
+        for s_start, s_end in segments:
+            try:
+                clob_url = (
+                    f"https://clob.polymarket.com/prices-history"
+                    f"?market={token_id}"
+                    f"&fidelity={fidelity}"
+                    f"&start_time={s_start.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                    f"&end_time={s_end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+                )
+                clob_resp = requests.get(clob_url, timeout=15)
+                if clob_resp.status_code != 200:
+                    continue
+                data = clob_resp.json()
+                # 支持多种响应格式
+                hist = []
+                if isinstance(data, list):
+                    hist = data
+                elif isinstance(data, dict):
+                    for key in ("history", "data", "prices", "results"):
+                        if key in data and isinstance(data[key], list):
+                            hist = data[key]
+                            break
+                history_all.extend(hist)
+            except Exception:
+                continue
+
+        if not history_all:
+            return []
+
+        # 解析为统一格式 [{t, p}], p 为 cent
+        seen = set()
+        result = []
+        for item in history_all:
+            if isinstance(item, dict):
+                t = item.get("t") or item.get("timestamp") or item.get("time")
+                p = item.get("p") or item.get("price")
+                if t is not None and p is not None:
+                    t_int = int(t)
+                    if t_int not in seen:
+                        seen.add(t_int)
+                        result.append({"t": t_int, "p": round(float(p) * 100, 2)})
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                t_int = int(item[0])
+                if t_int not in seen:
+                    seen.add(t_int)
+                    result.append({"t": t_int, "p": round(float(item[1]) * 100, 2)})
+
+        # 按时间排序
+        result.sort(key=lambda x: x["t"])
+        return result
+    except Exception as e:
+        print(f"获取价格历史失败 (condition: {condition_id[:20]}...): {e}")
+        return []
+
 # CTF Exchange 合约地址 (需要排除)
 CTF_EXCHANGE_ADDRESSES = {
     "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E".lower(),  # 旧版 Binary
@@ -892,7 +987,7 @@ def run_analysis(market_query, user_address, resolved_arg="AUTO", output_dir=Non
     
     # 检查是否取消
     if cancel_flag and cancel_flag.get("cancelled"):
-        return None, None, None, "CANCELLED"
+        return None, None, None, "CANCELLED", None
     
     # 更新进度: 搜索市场
     if cancel_flag:
@@ -901,7 +996,7 @@ def run_analysis(market_query, user_address, resolved_arg="AUTO", output_dir=Non
     # 搜索市场
     event, market = search_market(market_query)
     if not market:
-        return None, None, None, get_text('no_market_found', lang)
+        return None, None, None, get_text('no_market_found', lang), None
     
     market_title = (
         market.get("question")
@@ -931,7 +1026,7 @@ def run_analysis(market_query, user_address, resolved_arg="AUTO", output_dir=Non
     # 获取交易（先尝试 trades API，失败则用 activity API）
     raw_data, data_source = fetch_trades_with_fallback(condition_id, user_address)
     if not raw_data:
-        return None, None, None, get_text('no_trades', lang)
+        return None, None, None, get_text('no_trades', lang), None
     
     if data_source == "activity":
         print(f"[INFO] 使用 activity API 获取数据（neg-risk 交易）")
@@ -956,11 +1051,11 @@ def run_analysis(market_query, user_address, resolved_arg="AUTO", output_dir=Non
         try:
             maker_taker_roles = batch_get_maker_taker_roles(raw_data, user_address, cancel_flag)
         except CancelledError:
-            return None, None, None, "CANCELLED"
+            return None, None, None, "CANCELLED", None
     
     # 检查是否取消
     if cancel_flag and cancel_flag.get("cancelled"):
-        return None, None, None, "CANCELLED"
+        return None, None, None, "CANCELLED", None
     
     # 更新进度: 解析交易数据
     if cancel_flag:
@@ -1019,7 +1114,7 @@ def run_analysis(market_query, user_address, resolved_arg="AUTO", output_dir=Non
         parsed.append(entry)
     
     if not parsed:
-        return None, None, trades_file, "解析交易失败"
+        return None, None, trades_file, "解析交易失败", None
     
     # 交易来源分析（如果 neg_risk 模块可用）
     source_stats = None
@@ -1137,10 +1232,83 @@ def run_analysis(market_query, user_address, resolved_arg="AUTO", output_dir=Non
     cum_yes_cost_total = cum_yes_cost[-1] if len(cum_yes_cost) > 0 else 0
     cum_no_cost_total = cum_no_cost[-1] if len(cum_no_cost) > 0 else 0
     
+    # 保存时间线数据 (用于前端交互式图表)
+    timeline_items = []
+    yes_sh_pos = 0
+    no_sh_pos = 0
+    yes_buy_total = 0.0
+    yes_buy_cost_total = 0.0
+    no_buy_total = 0.0
+    no_buy_cost_total = 0.0
+    last_buy_price_0 = 0.0
+    last_buy_price_1 = 0.0
+
+    for i, e in enumerate(parsed):
+        is_buy = e["type"] == "Buy"
+        is_outcome_0 = (e.get("outcomeIndex", 0) == 0)
+
+        if is_outcome_0:
+            if is_buy:
+                yes_sh_pos += e["shares"]
+                yes_buy_total += e["shares"]
+                yes_buy_cost_total += e["cost"]
+                last_buy_price_0 = e["price"]
+            else:
+                yes_sh_pos -= e["shares"]
+        else:
+            if is_buy:
+                no_sh_pos += e["shares"]
+                no_buy_total += e["shares"]
+                no_buy_cost_total += e["cost"]
+                last_buy_price_1 = e["price"]
+            else:
+                no_sh_pos -= e["shares"]
+
+        avg_buy_0 = (yes_buy_cost_total / yes_buy_total * 100) if yes_buy_total > 0 else 0
+        avg_buy_1 = (no_buy_cost_total / no_buy_total * 100) if no_buy_total > 0 else 0
+
+        timeline_items.append({
+            "seq": i + 1,
+            "timestamp": e["timestamp"],
+            "type": e["type"],
+            "side": e["side"],
+            "outcomeIndex": e.get("outcomeIndex", 0),
+            "price": e["price"],
+            "shares": e["shares"],
+            "cost": round(e["cost"], 2),
+            "makerTaker": e.get("maker_taker", ""),
+            "source": e.get("source", ""),
+            "yesPosition": round(yes_sh_pos, 2),
+            "noPosition": round(no_sh_pos, 2),
+            "avgBuyPriceYes": round(avg_buy_0, 2),
+            "avgBuyPriceNo": round(avg_buy_1, 2),
+            "lastBuyPriceYes": round(last_buy_price_0, 2),
+            "lastBuyPriceNo": round(last_buy_price_1, 2),
+        })
+
+    price_history = fetch_price_history(condition_id)
+
+    timeline_file = f"{file_prefix}_timeline.json"
+    with open(timeline_file, "w", encoding="utf-8") as f:
+        json.dump({
+            "outcome0Name": outcome_0_name,
+            "outcome1Name": outcome_1_name,
+            "isResolved": is_resolved,
+            "resolvedSide": resolved_side,
+            "priceHistory": price_history,
+            "trades": timeline_items,
+            "summary": {
+                "totalTrades": len(parsed),
+                "finalYesPosition": round(yes_sh_curve[-1], 2) if yes_sh_curve else 0,
+                "finalNoPosition": round(no_sh_curve[-1], 2) if no_sh_curve else 0,
+                "totalSpent": round(net_curve[-1], 2) if net_curve else 0,
+            }
+        }, f, indent=2, ensure_ascii=False)
+
     # 更新进度: 生成图表
     if cancel_flag:
         cancel_flag["percent"] = 90
-    
+
     # ===== 生成图表 =====
     unique_timestamps = sorted(list(set(t['timestamp'] for t in parsed)))
     ts_map = {ts: i for i, ts in enumerate(unique_timestamps)}
@@ -1446,7 +1614,7 @@ def run_analysis(market_query, user_address, resolved_arg="AUTO", output_dir=Non
     if cancel_flag:
         cancel_flag["percent"] = 100
     
-    return chart_file, report_file, trades_file, None
+    return chart_file, report_file, trades_file, None, timeline_file
 
 
 def run_analysis_by_condition_id(condition_id, user_address, market_title="未知市场", resolved_arg="AUTO", output_dir=None, cancel_flag=None, is_resolved=False, outcomes_str=None, lang='zh', event_slug=None):
@@ -1472,7 +1640,7 @@ def run_analysis_by_condition_id(condition_id, user_address, market_title="未�
     
     # 检查是否取消
     if cancel_flag and cancel_flag.get("cancelled"):
-        return None, None, None, "CANCELLED"
+        return None, None, None, "CANCELLED", None
     
     # 更新进度: 获取交易数据
     if cancel_flag:
@@ -1494,7 +1662,7 @@ def run_analysis_by_condition_id(condition_id, user_address, market_title="未�
     
     # 只有当 trades 和链上事件都为空时才返回错误
     if not raw_data and not chain_events_for_check:
-        return None, None, None, get_text('no_trades', lang)
+        return None, None, None, get_text('no_trades', lang), None
     
     if data_source == "activity":
         print(f"[INFO] 使用 activity API 获取数据（neg-risk 交易）")
@@ -1544,11 +1712,11 @@ def run_analysis_by_condition_id(condition_id, user_address, market_title="未�
         try:
             maker_taker_roles = batch_get_maker_taker_roles(raw_data, user_address, cancel_flag)
         except CancelledError:
-            return None, None, None, "CANCELLED"
+            return None, None, None, "CANCELLED", None
     
     # 检查是否取消
     if cancel_flag and cancel_flag.get("cancelled"):
-        return None, None, None, "CANCELLED"
+        return None, None, None, "CANCELLED", None
     
     # 更新进度: 解析交易数据
     if cancel_flag:
@@ -1650,7 +1818,7 @@ def run_analysis_by_condition_id(condition_id, user_address, market_title="未�
     parsed.sort(key=lambda x: x.get('timestamp', 0))
     
     if not parsed:
-        return None, None, trades_file, "解析交易失败"
+        return None, None, trades_file, "解析交易失败", None
     
     # 交易来源分析（如果 neg_risk 模块可用且有 event_slug 且有交易数据）
     source_stats = None
@@ -1808,11 +1976,84 @@ def run_analysis_by_condition_id(condition_id, user_address, market_title="未�
     cum_no_total = cum_no[-1] if len(cum_no) > 0 else 0
     cum_yes_cost_total = cum_yes_cost[-1] if len(cum_yes_cost) > 0 else 0
     cum_no_cost_total = cum_no_cost[-1] if len(cum_no_cost) > 0 else 0
-    
+
+    # 保存时间线数据 (用于前端交互式图表)
+    timeline_items = []
+    yes_sh_pos = 0
+    no_sh_pos = 0
+    yes_buy_total = 0.0
+    yes_buy_cost_total = 0.0
+    no_buy_total = 0.0
+    no_buy_cost_total = 0.0
+    last_buy_price_0 = 0.0
+    last_buy_price_1 = 0.0
+
+    for i, e in enumerate(parsed):
+        is_buy = e["type"] == "Buy"
+        is_outcome_0 = (e.get("outcomeIndex", 0) == 0)
+
+        if is_outcome_0:
+            if is_buy:
+                yes_sh_pos += e["shares"]
+                yes_buy_total += e["shares"]
+                yes_buy_cost_total += e["cost"]
+                last_buy_price_0 = e["price"]
+            else:
+                yes_sh_pos -= e["shares"]
+        else:
+            if is_buy:
+                no_sh_pos += e["shares"]
+                no_buy_total += e["shares"]
+                no_buy_cost_total += e["cost"]
+                last_buy_price_1 = e["price"]
+            else:
+                no_sh_pos -= e["shares"]
+
+        avg_buy_0 = (yes_buy_cost_total / yes_buy_total * 100) if yes_buy_total > 0 else 0
+        avg_buy_1 = (no_buy_cost_total / no_buy_total * 100) if no_buy_total > 0 else 0
+
+        timeline_items.append({
+            "seq": i + 1,
+            "timestamp": e["timestamp"],
+            "type": e["type"],
+            "side": e["side"],
+            "outcomeIndex": e.get("outcomeIndex", 0),
+            "price": e["price"],
+            "shares": e["shares"],
+            "cost": round(e["cost"], 2),
+            "makerTaker": e.get("maker_taker", ""),
+            "source": e.get("source", ""),
+            "yesPosition": round(yes_sh_pos, 2),
+            "noPosition": round(no_sh_pos, 2),
+            "avgBuyPriceYes": round(avg_buy_0, 2),
+            "avgBuyPriceNo": round(avg_buy_1, 2),
+            "lastBuyPriceYes": round(last_buy_price_0, 2),
+            "lastBuyPriceNo": round(last_buy_price_1, 2),
+        })
+
+    price_history = fetch_price_history(condition_id)
+
+    timeline_file = f"{file_prefix}_timeline.json"
+    with open(timeline_file, "w", encoding="utf-8") as f:
+        json.dump({
+            "outcome0Name": outcome_0_name,
+            "outcome1Name": outcome_1_name,
+            "isResolved": is_resolved,
+            "resolvedSide": resolved_side,
+            "priceHistory": price_history,
+            "trades": timeline_items,
+            "summary": {
+                "totalTrades": len(parsed),
+                "finalYesPosition": round(yes_sh_curve[-1], 2) if yes_sh_curve else 0,
+                "finalNoPosition": round(no_sh_curve[-1], 2) if no_sh_curve else 0,
+                "totalSpent": round(net_curve[-1], 2) if net_curve else 0,
+            }
+        }, f, indent=2, ensure_ascii=False)
+
     # 更新进度: 生成图表
     if cancel_flag:
         cancel_flag["percent"] = 90
-    
+
     # 生成图表
     unique_timestamps = sorted(list(set(t['timestamp'] for t in parsed)))
     ts_map = {ts: i for i, ts in enumerate(unique_timestamps)}
@@ -2007,7 +2248,7 @@ def run_analysis_by_condition_id(condition_id, user_address, market_title="未�
     if cancel_flag:
         cancel_flag["percent"] = 100
     
-    return chart_file, report_file, trades_file, None
+    return chart_file, report_file, trades_file, None, timeline_file
 
 
 if __name__ == "__main__":
