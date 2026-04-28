@@ -221,98 +221,132 @@ PRICE_RESOLUTION_THRESHOLD = 0.5
 
 
 def fetch_price_history(condition_id):
-    """获取市场历史价格曲线 (CLOB API + Gamma API).
+    """获取市场历史价格曲线 (Yes / No 分开, 互补对齐).
 
-    1. 从 Gamma API 获取市场的 clobTokenIds (Yes 代币 ID)
-    2. 从 CLOB API /prices-history 获取价格历史
-    返回 [{t: unix秒, p: 价格¢}]
-    失败时返回空列表。
+    从 CLOB prices-history 多分辨率拉取:
+    - interval=max: 全历史 (~10分钟间隔)
+    - interval=1d:  近24小时 (~1分钟间隔, 更高精度)
+    合并后每个时间点同时写入 Yes 和 No 价格, Yes + No = 100.
+
+    返回 {"yes": [{t, p}], "no": [{t, p}]}
     """
     if not condition_id:
-        return []
+        return {"yes": [], "no": []}
+
+    # Step 1: 从 Gamma API 获取 token IDs
+    token_yes = None
+    token_no = None
     try:
-        # Step 1: 从 Gamma API 获取市场的 token ID
         gamma_url = f"https://gamma-api.polymarket.com/markets?condition_id={condition_id}"
         gamma_resp = requests.get(gamma_url, timeout=15)
         gamma_resp.raise_for_status()
         gamma_data = gamma_resp.json()
-        if not isinstance(gamma_data, list) or len(gamma_data) == 0:
-            return []
-
-        market = gamma_data[0]
-        clob_ids = market.get("clobTokenIds", [])
-        if not clob_ids:
-            return []
-        token_id = clob_ids[0]  # Yes 代币 ID
-
-        # Step 2: 从 CLOB API 获取价格历史 (最大支持 15 天区间)
-        # 先获取所有历史数据
-        history_all = []
-        fidelity = 3600  # 1小时间隔
-        # 往前查 90 天
-        end_dt = datetime.datetime.now(datetime.timezone.utc)
-        start_dt = end_dt - datetime.timedelta(days=90)
-        segments = []
-        # 按 15 天分段
-        seg_start = start_dt
-        while seg_start < end_dt:
-            seg_end = min(seg_start + datetime.timedelta(days=14), end_dt)
-            segments.append((seg_start, seg_end))
-            seg_start = seg_end + datetime.timedelta(seconds=1)
-
-        for s_start, s_end in segments:
-            try:
-                clob_url = (
-                    f"https://clob.polymarket.com/prices-history"
-                    f"?market={token_id}"
-                    f"&fidelity={fidelity}"
-                    f"&start_time={s_start.strftime('%Y-%m-%dT%H:%M:%SZ')}"
-                    f"&end_time={s_end.strftime('%Y-%m-%dT%H:%M:%SZ')}"
-                )
-                clob_resp = requests.get(clob_url, timeout=15)
-                if clob_resp.status_code != 200:
-                    continue
-                data = clob_resp.json()
-                # 支持多种响应格式
-                hist = []
-                if isinstance(data, list):
-                    hist = data
-                elif isinstance(data, dict):
-                    for key in ("history", "data", "prices", "results"):
-                        if key in data and isinstance(data[key], list):
-                            hist = data[key]
-                            break
-                history_all.extend(hist)
-            except Exception:
-                continue
-
-        if not history_all:
-            return []
-
-        # 解析为统一格式 [{t, p}], p 为 cent
-        seen = set()
-        result = []
-        for item in history_all:
-            if isinstance(item, dict):
-                t = item.get("t") or item.get("timestamp") or item.get("time")
-                p = item.get("p") or item.get("price")
-                if t is not None and p is not None:
-                    t_int = int(t)
-                    if t_int not in seen:
-                        seen.add(t_int)
-                        result.append({"t": t_int, "p": round(float(p) * 100, 2)})
-            elif isinstance(item, (list, tuple)) and len(item) >= 2:
-                t_int = int(item[0])
-                if t_int not in seen:
-                    seen.add(t_int)
-                    result.append({"t": t_int, "p": round(float(item[1]) * 100, 2)})
-
-        # 按时间排序
-        result.sort(key=lambda x: x["t"])
-        return result
+        if isinstance(gamma_data, list) and len(gamma_data) > 0:
+            clob_ids = gamma_data[0].get("clobTokenIds", [])
+            if isinstance(clob_ids, str):
+                try:
+                    clob_ids = json.loads(clob_ids)
+                except (json.JSONDecodeError, TypeError):
+                    clob_ids = []
+            if isinstance(clob_ids, list) and len(clob_ids) >= 2:
+                token_yes, token_no = clob_ids[0], clob_ids[1]
     except Exception as e:
-        print(f"获取价格历史失败 (condition: {condition_id[:20]}...): {e}")
+        print(f"获取 token IDs 失败: {e}")
+
+    if not token_yes or not token_no:
+        return {"yes": [], "no": []}
+
+    # Step 2: 多分辨率拉取
+    # max = 全历史 (~10min间隔), 1d = 近24h (~1min间隔)
+    yes_max = _fetch_price_for_token(token_yes, "max")
+    no_max = _fetch_price_for_token(token_no, "max")
+    yes_1d = _fetch_price_for_token(token_yes, "1d")
+    no_1d = _fetch_price_for_token(token_no, "1d")
+
+    # Step 3: 合并到统一时间轴 (1d 高分辨率数据优先)
+    # 每一笔成交/价格点同时写入 Yes 和 No 互补价格
+    points_by_time = {}  # ts_int -> (yes_p, no_p)
+
+    def add_point(t, p, is_yes):
+        if is_yes:
+            points_by_time[t] = (p, round(100 - p, 2))
+        else:
+            if t not in points_by_time:
+                points_by_time[t] = (round(100 - p, 2), p)
+
+    # 先添加 max (全历史), 再添加 1d (高分辨率覆盖)
+    for pt in yes_max:
+        add_point(pt["t"], pt["p"], True)
+    for pt in no_max:
+        add_point(pt["t"], pt["p"], False)
+    for pt in yes_1d:
+        add_point(pt["t"], pt["p"], True)
+    for pt in no_1d:
+        add_point(pt["t"], pt["p"], False)
+
+    # Step 4: 按时间排序输出
+    yes_curve = []
+    no_curve = []
+    for ts in sorted(points_by_time.keys()):
+        yp, np = points_by_time[ts]
+        yes_curve.append({"t": ts, "p": yp})
+        no_curve.append({"t": ts, "p": np})
+
+    return {"yes": yes_curve, "no": no_curve}
+
+
+def _fetch_price_for_token(token_id, interval="max"):
+    """从 CLOB prices-history 端点拉取代币的历史价格曲线."""
+    url = f"https://clob.polymarket.com/prices-history?market={token_id}&interval={interval}&fidelity=1"
+    try:
+        resp = requests.get(url, timeout=60)
+        if resp.status_code != 200:
+            print(f"prices-history 请求失败 (token={str(token_id)[:20]}, interval={interval}): HTTP {resp.status_code}")
+            return []
+        data = resp.json()
+        history = data.get("history", [])
+        curve = []
+        for point in history:
+            t = point.get("t")
+            p = point.get("p")
+            if t is None or p is None:
+                continue
+            p_cents = round(float(p) * 100, 2)
+            curve.append({"t": int(t), "p": p_cents})
+        return curve
+    except Exception as e:
+        print(f"prices-history 获取失败 (token={str(token_id)[:20]}, interval={interval}): {e}")
         return []
+
+
+def build_price_history_from_trades(parsed_trades):
+    """从已解析的交易记录构建价格历史曲线.
+
+    每一笔交易同时给出 Yes 和 No 价格点, 保证任意时刻 Yes + No = 100:
+    - 对于 outcomeIndex=0 (Yes) 的交易: Yes 价格 = 成交价, No 价格 = 100 - 成交价
+    - 对于 outcomeIndex=1 (No) 的交易:  No 价格 = 成交价, Yes 价格 = 100 - 成交价
+
+    返回 {"yes": [{t, p}], "no": [{t, p}]}, 与 fetch_price_history 格式一致.
+    """
+    yes_points = []
+    no_points = []
+    for t in parsed_trades:
+        record_type = t.get('record_type', 'trade')
+        # 跳过链上事件 (Split/Merge/Redeem), 它们没有交易价格
+        if record_type not in ('trade', None):
+            continue
+        price = t.get('price', 0)
+        if price <= 0:
+            continue
+        ts = t.get('timestamp', 0)
+        outcome_idx = t.get('outcomeIndex', 0)
+        if outcome_idx == 0:
+            yes_points.append({"t": ts, "p": price})
+            no_points.append({"t": ts, "p": round(100 - price, 2)})
+        else:
+            yes_points.append({"t": ts, "p": round(100 - price, 2)})
+            no_points.append({"t": ts, "p": price})
+    return {"yes": yes_points, "no": no_points}
 
 # CTF Exchange 合约地址 (需要排除)
 CTF_EXCHANGE_ADDRESSES = {
@@ -1286,7 +1320,7 @@ def run_analysis(market_query, user_address, resolved_arg="AUTO", output_dir=Non
             "lastBuyPriceNo": round(last_buy_price_1, 2),
         })
 
-    price_history = fetch_price_history(condition_id)
+    price_history = build_price_history_from_trades(parsed)
 
     timeline_file = f"{file_prefix}_timeline.json"
     with open(timeline_file, "w", encoding="utf-8") as f:
@@ -2031,7 +2065,7 @@ def run_analysis_by_condition_id(condition_id, user_address, market_title="未�
             "lastBuyPriceNo": round(last_buy_price_1, 2),
         })
 
-    price_history = fetch_price_history(condition_id)
+    price_history = build_price_history_from_trades(parsed)
 
     timeline_file = f"{file_prefix}_timeline.json"
     with open(timeline_file, "w", encoding="utf-8") as f:

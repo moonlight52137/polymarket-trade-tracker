@@ -1304,6 +1304,13 @@
         let currentCardTradeIdx = {};
         let activeCardId = null;
 
+        function formatTimestamp(ms) {
+            const d = new Date(ms);
+            const pad = (n) => String(n).padStart(2, '0');
+            return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+                + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+        }
+
         function setActiveCard(cardId) { activeCardId = cardId; }
 
         async function renderCardInteractiveChart(cardId, taskId, result) {
@@ -1320,7 +1327,9 @@
 
             const trades = timelineData.trades;
             if (!trades || trades.length === 0) return;
-            const priceHistory = timelineData.priceHistory || [];
+            const priceHistory = timelineData.priceHistory || {};
+            const phYes = priceHistory.yes || [];
+            const phNo = priceHistory.no || [];
 
             cardTimelineData[cardId] = timelineData;
             currentCardTradeIdx[cardId] = -1;
@@ -1354,14 +1363,18 @@
                 tooltip: {
                     trigger: 'item',
                     formatter: function(params) {
-                        if (params.seriesName === 'Market Price') {
-                            return '<b>市场价格</b><br/>' + new Date(params.value[0]).toLocaleString()
+                        if (params.seriesName === 'Yes Price') {
+                            return '<b>Yes 价格</b><br/>' + formatTimestamp(params.value[0])
+                                + '<br/>' + params.value[1].toFixed(1) + '¢';
+                        }
+                        if (params.seriesName === 'No Price') {
+                            return '<b>No 价格</b><br/>' + formatTimestamp(params.value[0])
                                 + '<br/>' + params.value[1].toFixed(1) + '¢';
                         }
                         var origIdx = params.data ? (params.data[8] !== undefined ? params.data[8] : params.dataIndex) : params.dataIndex;
                         var t = trades[origIdx];
                         if (!t) return '';
-                        const dt = new Date(t.timestamp * 1000).toLocaleString();
+                        const dt = formatTimestamp(t.timestamp * 1000);
                         return `
                             <div style="font-size:13px;line-height:1.8">
                                 <b>#${t.seq}</b> ${dt}<br/>
@@ -1384,12 +1397,23 @@
                     borderColor: '#6366f1',
                     borderWidth: 1,
                     textStyle: { color: '#e2e8f0', fontSize: 12 },
-                    extraCssText: 'border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.4);',
+                    extraCssText: 'border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.4);z-index:9999;',
+                    confine: true,
+                    alwaysShowContent: true,
                 },
-                grid: { left: 60, right: 30, top: 50, bottom: 50 },
+                grid: { left: 60, right: 30, top: 70, bottom: 70 },
                 xAxis: {
                     type: 'time',
-                    axisLabel: { color: '#9ca3af', fontSize: 10 },
+                    axisLabel: {
+                        color: '#9ca3af',
+                        fontSize: 10,
+                        formatter: function(value) {
+                            const d = new Date(value);
+                            const pad = (n) => String(n).padStart(2, '0');
+                            return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate())
+                                + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+                        },
+                    },
                     axisLine: { lineStyle: { color: '#374151' } },
                     splitLine: { show: true, lineStyle: { color: '#1f2937', type: 'dashed' } },
                 },
@@ -1405,13 +1429,33 @@
                 series: [
                     {
                         type: 'line',
-                        name: 'Market Price',
-                        data: priceHistory.map(ph => [ph.t * 1000, ph.p]),
-                        smooth: true,
-                        symbol: 'none',
-                        lineStyle: { color: '#f59e0b', width: 2, opacity: 0.7 },
+                        name: 'Yes Price',
+                        data: phYes.map(ph => [ph.t * 1000, ph.p]),
+                        smooth: false,
+                        step: 'end',
+                        symbol: 'circle',
+                        symbolSize: 5,
+                        itemStyle: { color: '#4ade80' },
+                        lineStyle: { color: '#4ade80', width: 1.5, opacity: 0.8 },
                         z: 1,
                         animation: false,
+                        large: true,
+                        largeThreshold: 500,
+                    },
+                    {
+                        type: 'line',
+                        name: 'No Price',
+                        data: phNo.map(ph => [ph.t * 1000, ph.p]),
+                        smooth: false,
+                        step: 'end',
+                        symbol: 'circle',
+                        symbolSize: 5,
+                        itemStyle: { color: '#f87171' },
+                        lineStyle: { color: '#f87171', width: 1.5, opacity: 0.8 },
+                        z: 1,
+                        animation: false,
+                        large: true,
+                        largeThreshold: 500,
                     },
                     {
                         type: 'scatter',
@@ -1461,16 +1505,56 @@
                 ],
                 graphic: [
                     {
+                        type: 'rect',
+                        left: 60,
+                        top: 4,
+                        right: 30,
+                        shape: { height: 56 },
+                        style: { fill: 'transparent' },
+                        z: 99,
+                    },
+                    {
                         type: 'text',
-                        left: '1%',
-                        top: '3%',
+                        left: 66,
+                        top: 8,
                         style: {
                             text: '',
                             fill: '#e2e8f0',
-                            fontSize: 11,
-                            lineHeight: 18,
+                            fontSize: 12,
+                            lineHeight: 20,
                             textShadowColor: 'rgba(0,0,0,0.9)',
                             textShadowBlur: 6,
+                        },
+                        z: 100,
+                    },
+                    {
+                        type: 'rect',
+                        left: 60,
+                        bottom: 4,
+                        right: 30,
+                        shape: { height: 56 },
+                        style: {
+                            fill: 'rgba(15,15,35,0.7)',
+                            stroke: 'rgba(99,102,241,0.15)',
+                            lineWidth: 1,
+                            borderRadius: 4,
+                        },
+                        z: 99,
+                    },
+                    {
+                        type: 'text',
+                        left: 68,
+                        bottom: 12,
+                        style: {
+                            text: '{buyY|● Buy Yes}   {sellY|◆ Sell Yes}   {buyN|● Buy No}   {sellN|◆ Sell No}',
+                            rich: {
+                                buyY: { fill: '#4ade80', fontSize: 11, fontWeight: 'bold' },
+                                sellY: { fill: '#22c55e', fontSize: 11 },
+                                buyN: { fill: '#e879f9', fontSize: 11, fontWeight: 'bold' },
+                                sellN: { fill: '#f87171', fontSize: 11 },
+                            },
+                            fill: '#9ca3af',
+                            fontSize: 11,
                         },
                         z: 100,
                     },
@@ -1482,7 +1566,7 @@
 
             // 点击图表同步到滑块
             cardEchartInstances[cardId].on('click', function(params) {
-                if (params.dataIndex !== undefined && params.seriesName !== 'Market Price' && params.seriesName !== 'Selected') {
+                if (params.dataIndex !== undefined && params.seriesName !== 'Yes Price' && params.seriesName !== 'No Price' && params.seriesName !== 'Selected') {
                     setActiveCard(cardId);
                     var origIdx = params.data ? (params.data[8] !== undefined ? params.data[8] : params.dataIndex) : params.dataIndex;
                     document.getElementById(`${cardId}-slider`).value = origIdx;
@@ -1546,7 +1630,13 @@
             const slider = document.getElementById(`${cardId}-slider`);
             const pct = total > 1 ? (idx / (total - 1)) * 100 : 0;
             slider.style.setProperty('--progress', pct + '%');
-            document.getElementById(`${cardId}-tradeLabel`).textContent = `第 ${idx + 1} / ${total} 笔`;
+            let labelText = `第 ${idx + 1} / ${total} 笔`;
+            const tData = cardTimelineData[cardId];
+            if (tData && tData.trades && tData.trades[idx]) {
+                const ts = formatTimestamp(tData.trades[idx].timestamp * 1000);
+                labelText += `  ·  ${ts}`;
+            }
+            document.getElementById(`${cardId}-tradeLabel`).textContent = labelText;
         }
 
         function highlightCardTrade(cardId, idx, trades) {
@@ -1624,22 +1714,79 @@
                     },
                 ],
                 graphic: [{
-                    type: 'text',
-                    left: '1%',
-                    top: '3%',
+                    type: 'rect',
+                    left: 60,
+                    top: 4,
+                    right: 30,
+                    shape: { height: 56 },
                     style: {
-                        text: on0 + ': ' + yesVal + ' sh   ' + on1 + ': ' + noVal + ' sh\n'
-                            + '敞口: $' + exposure + '\n'
-                            + '均买/最后  Yes: ' + avgY + ' | ' + lastY + '\n'
-                            + '均买/最后  No: ' + avgN + ' | ' + lastN,
-                        fill: '#e2e8f0',
+                        fill: 'rgba(15,15,35,0.85)',
+                        stroke: 'rgba(99,102,241,0.25)',
+                        lineWidth: 1,
+                        borderRadius: 4,
+                    },
+                    z: 99,
+                }, {
+                    type: 'text',
+                    left: 66,
+                    top: 8,
+                    style: {
+                        text: '{g0|' + on0 + ':} {gv0|' + yesVal + ' sh}  均买 {gv1|' + avgY + '}  最后 {gv2|' + lastY + '}    '
+                            + '{r0|' + on1 + ':} {rv0|' + noVal + ' sh}  均买 {rv1|' + avgN + '}  最后 {rv2|' + lastN + '}    '
+                            + '敞口: {exp|$' + exposure + '}',
+                        rich: {
+                            g0: { fill: '#4ade80', fontSize: 12, fontWeight: 'bold' },
+                            gv0: { fill: '#e2e8f0', fontSize: 12 },
+                            gv1: { fill: '#86efac', fontSize: 12 },
+                            gv2: { fill: '#bbf7d0', fontSize: 12 },
+                            r0: { fill: '#f87171', fontSize: 12, fontWeight: 'bold' },
+                            rv0: { fill: '#e2e8f0', fontSize: 12 },
+                            rv1: { fill: '#fca5a5', fontSize: 12 },
+                            rv2: { fill: '#fecaca', fontSize: 12 },
+                            exp: { fill: '#fbbf24', fontSize: 12, fontWeight: 'bold' },
+                        },
+                        fill: '#9ca3af',
+                        fontSize: 12,
+                        lineHeight: 20,
+                    },
+                    z: 100,
+                }, {
+                    type: 'rect',
+                    left: 60,
+                    bottom: 4,
+                    right: 30,
+                    shape: { height: 56 },
+                    style: {
+                        fill: 'rgba(15,15,35,0.7)',
+                        stroke: 'rgba(99,102,241,0.15)',
+                        lineWidth: 1,
+                        borderRadius: 4,
+                    },
+                    z: 99,
+                }, {
+                    type: 'text',
+                    left: 68,
+                    bottom: 12,
+                    style: {
+                        text: '{buyY|● Buy Yes}   {sellY|◆ Sell Yes}   {buyN|● Buy No}   {sellN|◆ Sell No}',
+                        rich: {
+                            buyY: { fill: '#4ade80', fontSize: 11, fontWeight: 'bold' },
+                            sellY: { fill: '#22c55e', fontSize: 11 },
+                            buyN: { fill: '#e879f9', fontSize: 11, fontWeight: 'bold' },
+                            sellN: { fill: '#f87171', fontSize: 11 },
+                        },
+                        fill: '#9ca3af',
                         fontSize: 11,
-                        lineHeight: 18,
-                        textShadowColor: 'rgba(0,0,0,0.9)',
-                        textShadowBlur: 6,
                     },
                     z: 100,
                 }],
+            });
+
+            // 自动显示 tooltip
+            echartInstance.dispatchAction({
+                type: 'showTip',
+                seriesIndex: 1,
+                dataIndex: idx,
             });
         }
 
