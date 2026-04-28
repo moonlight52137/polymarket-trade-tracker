@@ -1342,35 +1342,39 @@
             if (cardEchartInstances[cardId]) cardEchartInstances[cardId].dispose();
             cardEchartInstances[cardId] = echarts.init(dom);
 
-            const styleMap = {
-                'Buy_0': { color: '#008f00', symbol: 'circle' },
-                'Sell_0': { color: '#00c800', symbol: 'diamond' },
-                'Buy_1': { color: '#d000d0', symbol: 'circle' },
-                'Sell_1': { color: '#d40000', symbol: 'diamond' },
-            };
+            const out0 = timelineData.outcome0Name;
+            const out1 = timelineData.outcome1Name;
 
-            const scatterData = trades.map((t, idx) => ({
-                value: [t.timestamp * 1000, t.price, t.shares, t.cost, t.type, t.side, t.makerTaker, t.source, idx],
-                name: `${t.type} ${t.side}`,
-                itemStyle: {
-                    color: styleMap[`${t.type}_${t.outcomeIndex}`]?.color || '#888',
-                },
-                symbol: styleMap[`${t.type}_${t.outcomeIndex}`]?.symbol || 'circle',
-                symbolSize: 10,
-            }));
+            const buyYesData = [];
+            const sellYesData = [];
+            const buyNoData = [];
+            const sellNoData = [];
+
+            trades.forEach(function(t, idx) {
+                var point = {
+                    value: [t.timestamp * 1000, t.price, t.shares, t.cost, t.type, t.side, t.makerTaker, t.source, idx],
+                    symbolSize: 10,
+                };
+                var key = t.type + '_' + t.outcomeIndex;
+                if (key === 'Buy_0') buyYesData.push(point);
+                else if (key === 'Sell_0') sellYesData.push(point);
+                else if (key === 'Buy_1') buyNoData.push(point);
+                else if (key === 'Sell_1') sellNoData.push(point);
+            });
 
             const option = {
                 tooltip: {
                     trigger: 'item',
                     formatter: function(params) {
-                        if (params.seriesName === 'Yes Price') {
+                        if (params.seriesName === 'Yes 价格') {
                             return '<b>Yes 价格</b><br/>' + formatTimestamp(params.value[0])
                                 + '<br/>' + params.value[1].toFixed(1) + '¢';
                         }
-                        if (params.seriesName === 'No Price') {
+                        if (params.seriesName === 'No 价格') {
                             return '<b>No 价格</b><br/>' + formatTimestamp(params.value[0])
                                 + '<br/>' + params.value[1].toFixed(1) + '¢';
                         }
+                        if (params.seriesName === 'Selected') return '';
                         var origIdx = params.data ? (params.data[8] !== undefined ? params.data[8] : params.dataIndex) : params.dataIndex;
                         var t = trades[origIdx];
                         if (!t) return '';
@@ -1401,7 +1405,15 @@
                     confine: true,
                     alwaysShowContent: true,
                 },
-                grid: { left: 60, right: 30, top: 70, bottom: 70 },
+                legend: {
+                    data: ['Yes 价格', 'No 价格', '买入 ' + out0, '卖出 ' + out0, '买入 ' + out1, '卖出 ' + out1],
+                    textStyle: { color: '#9ca3af', fontSize: 11 },
+                    top: 38,
+                    left: 'center',
+                    selectedMode: true,
+                    inactiveColor: '#4b5563',
+                },
+                grid: { left: 60, right: 30, top: 70, bottom: 50 },
                 xAxis: {
                     type: 'time',
                     axisLabel: {
@@ -1429,8 +1441,8 @@
                 series: [
                     {
                         type: 'line',
-                        name: 'Yes Price',
-                        data: phYes.map(ph => [ph.t * 1000, ph.p]),
+                        name: 'Yes 价格',
+                        data: phYes.map(function(ph) { return [ph.t * 1000, ph.p]; }),
                         smooth: false,
                         step: 'end',
                         symbol: 'circle',
@@ -1444,8 +1456,8 @@
                     },
                     {
                         type: 'line',
-                        name: 'No Price',
-                        data: phNo.map(ph => [ph.t * 1000, ph.p]),
+                        name: 'No 价格',
+                        data: phNo.map(function(ph) { return [ph.t * 1000, ph.p]; }),
                         smooth: false,
                         step: 'end',
                         symbol: 'circle',
@@ -1459,29 +1471,52 @@
                     },
                     {
                         type: 'scatter',
-                        name: 'Trades',
-                        data: scatterData,
-                        symbolSize: function(val, params) {
-                            var origIdx = params.data ? (params.data[8] !== undefined ? params.data[8] : params.dataIndex) : params.dataIndex;
-                            return origIdx === currentCardTradeIdx[cardId] ? 18 : 10;
-                        },
-                        itemStyle: {
-                            borderColor: function(params) {
-                                var origIdx = params.data ? (params.data[8] !== undefined ? params.data[8] : params.dataIndex) : params.dataIndex;
-                                return origIdx === currentCardTradeIdx[cardId] ? '#FFD700' : 'transparent';
-                            },
-                            borderWidth: function(params) {
-                                var origIdx = params.data ? (params.data[8] !== undefined ? params.data[8] : params.dataIndex) : params.dataIndex;
-                                return origIdx === currentCardTradeIdx[cardId] ? 3 : 0;
-                            },
-                        },
+                        name: '买入 ' + out0,
+                        data: buyYesData,
+                        symbol: 'circle',
+                        itemStyle: { color: '#008f00' },
+                        symbolSize: 10,
                         emphasis: {
-                            itemStyle: {
-                                borderColor: '#FFD700',
-                                borderWidth: 3,
-                                shadowBlur: 15,
-                                shadowColor: 'rgba(255, 215, 0, 0.6)',
-                            },
+                            itemStyle: { borderColor: '#FFD700', borderWidth: 3, shadowBlur: 15, shadowColor: 'rgba(255,215,0,0.6)' },
+                        },
+                        animation: false,
+                        z: 2,
+                    },
+                    {
+                        type: 'scatter',
+                        name: '卖出 ' + out0,
+                        data: sellYesData,
+                        symbol: 'diamond',
+                        itemStyle: { color: '#00c800' },
+                        symbolSize: 10,
+                        emphasis: {
+                            itemStyle: { borderColor: '#FFD700', borderWidth: 3, shadowBlur: 15, shadowColor: 'rgba(255,215,0,0.6)' },
+                        },
+                        animation: false,
+                        z: 2,
+                    },
+                    {
+                        type: 'scatter',
+                        name: '买入 ' + out1,
+                        data: buyNoData,
+                        symbol: 'circle',
+                        itemStyle: { color: '#d000d0' },
+                        symbolSize: 10,
+                        emphasis: {
+                            itemStyle: { borderColor: '#FFD700', borderWidth: 3, shadowBlur: 15, shadowColor: 'rgba(255,215,0,0.6)' },
+                        },
+                        animation: false,
+                        z: 2,
+                    },
+                    {
+                        type: 'scatter',
+                        name: '卖出 ' + out1,
+                        data: sellNoData,
+                        symbol: 'diamond',
+                        itemStyle: { color: '#d40000' },
+                        symbolSize: 10,
+                        emphasis: {
+                            itemStyle: { borderColor: '#FFD700', borderWidth: 3, shadowBlur: 15, shadowColor: 'rgba(255,215,0,0.6)' },
                         },
                         animation: false,
                         z: 2,
@@ -1527,37 +1562,6 @@
                         },
                         z: 100,
                     },
-                    {
-                        type: 'rect',
-                        left: 60,
-                        bottom: 4,
-                        right: 30,
-                        shape: { height: 56 },
-                        style: {
-                            fill: 'rgba(15,15,35,0.7)',
-                            stroke: 'rgba(99,102,241,0.15)',
-                            lineWidth: 1,
-                            borderRadius: 4,
-                        },
-                        z: 99,
-                    },
-                    {
-                        type: 'text',
-                        left: 68,
-                        bottom: 12,
-                        style: {
-                            text: '{buyY|● Buy Yes}   {sellY|◆ Sell Yes}   {buyN|● Buy No}   {sellN|◆ Sell No}',
-                            rich: {
-                                buyY: { fill: '#4ade80', fontSize: 11, fontWeight: 'bold' },
-                                sellY: { fill: '#22c55e', fontSize: 11 },
-                                buyN: { fill: '#e879f9', fontSize: 11, fontWeight: 'bold' },
-                                sellN: { fill: '#f87171', fontSize: 11 },
-                            },
-                            fill: '#9ca3af',
-                            fontSize: 11,
-                        },
-                        z: 100,
-                    },
                 ],
                 dataZoom: [{ type: 'inside', start: 0, end: 100 }],
             };
@@ -1566,10 +1570,19 @@
 
             // 点击图表同步到滑块
             cardEchartInstances[cardId].on('click', function(params) {
-                if (params.dataIndex !== undefined && params.seriesName !== 'Yes Price' && params.seriesName !== 'No Price' && params.seriesName !== 'Selected') {
-                    setActiveCard(cardId);
-                    var origIdx = params.data ? (params.data[8] !== undefined ? params.data[8] : params.dataIndex) : params.dataIndex;
-                    document.getElementById(`${cardId}-slider`).value = origIdx;
+                if (params.dataIndex === undefined) return;
+                if (params.seriesName === 'Selected') return;
+
+                setActiveCard(cardId);
+                var origIdx;
+                if (params.seriesName === 'Yes 价格' || params.seriesName === 'No 价格') {
+                    origIdx = params.dataIndex;
+                } else {
+                    origIdx = params.data ? (params.data[8] !== undefined ? params.data[8] : params.dataIndex) : params.dataIndex;
+                }
+
+                if (origIdx >= 0 && origIdx < trades.length) {
+                    document.getElementById(cardId + '-slider').value = origIdx;
                     updateCardSliderStyle(cardId, origIdx, trades.length);
                     updateCardPositionPanel(cardId, origIdx, trades);
                     highlightCardTrade(cardId, origIdx, trades);
@@ -1657,14 +1670,19 @@
                 'Buy_1': 'circle', 'Sell_1': 'diamond',
             };
 
-            var scatterData = trades.map(function(tr, i) {
-                return {
+            var buyYesD = [], sellYesD = [], buyNoD = [], sellNoD = [];
+            trades.forEach(function(tr, i) {
+                var pt = {
                     value: [tr.timestamp * 1000, tr.price, tr.shares, tr.cost, tr.type, tr.side, tr.makerTaker, tr.source, i],
-                    name: tr.type + ' ' + tr.side,
                     itemStyle: { color: styleMap[tr.type + '_' + tr.outcomeIndex] || '#888' },
                     symbol: symbolMap[tr.type + '_' + tr.outcomeIndex] || 'circle',
                     symbolSize: i === idx ? 18 : 10,
                 };
+                var key = tr.type + '_' + tr.outcomeIndex;
+                if (key === 'Buy_0') buyYesD.push(pt);
+                else if (key === 'Sell_0') sellYesD.push(pt);
+                else if (key === 'Buy_1') buyNoD.push(pt);
+                else if (key === 'Sell_1') sellNoD.push(pt);
             });
 
             var highlightData = [{
@@ -1698,20 +1716,25 @@
             var avgN = t.avgBuyPriceNo > 0 ? t.avgBuyPriceNo.toFixed(1) + '¢' : '-';
             var lastN = t.lastBuyPriceNo > 0 ? t.lastBuyPriceNo.toFixed(1) + '¢' : '-';
 
+            var yesZ = t.outcomeIndex === 0 ? 3 : 1;
+            var noZ = t.outcomeIndex === 1 ? 3 : 1;
+
             echartInstance.setOption({
                 series: [
-                    {},
                     {
-                        data: scatterData,
+                        z: yesZ,
                         markLine: markLineData.length > 0 ? {
                             silent: true,
                             symbol: 'none',
                             data: markLineData,
                         } : undefined,
                     },
-                    {
-                        data: highlightData,
-                    },
+                    { z: noZ },
+                    { data: buyYesD },
+                    { data: sellYesD },
+                    { data: buyNoD },
+                    { data: sellNoD },
+                    { data: highlightData },
                 ],
                 graphic: [{
                     type: 'rect',
@@ -1750,42 +1773,12 @@
                         lineHeight: 20,
                     },
                     z: 100,
-                }, {
-                    type: 'rect',
-                    left: 60,
-                    bottom: 4,
-                    right: 30,
-                    shape: { height: 56 },
-                    style: {
-                        fill: 'rgba(15,15,35,0.7)',
-                        stroke: 'rgba(99,102,241,0.15)',
-                        lineWidth: 1,
-                        borderRadius: 4,
-                    },
-                    z: 99,
-                }, {
-                    type: 'text',
-                    left: 68,
-                    bottom: 12,
-                    style: {
-                        text: '{buyY|● Buy Yes}   {sellY|◆ Sell Yes}   {buyN|● Buy No}   {sellN|◆ Sell No}',
-                        rich: {
-                            buyY: { fill: '#4ade80', fontSize: 11, fontWeight: 'bold' },
-                            sellY: { fill: '#22c55e', fontSize: 11 },
-                            buyN: { fill: '#e879f9', fontSize: 11, fontWeight: 'bold' },
-                            sellN: { fill: '#f87171', fontSize: 11 },
-                        },
-                        fill: '#9ca3af',
-                        fontSize: 11,
-                    },
-                    z: 100,
                 }],
             });
 
-            // 自动显示 tooltip
             echartInstance.dispatchAction({
                 type: 'showTip',
-                seriesIndex: 1,
+                seriesIndex: 0,
                 dataIndex: idx,
             });
         }
