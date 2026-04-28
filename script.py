@@ -348,6 +348,130 @@ def build_price_history_from_trades(parsed_trades):
             no_points.append({"t": ts, "p": price})
     return {"yes": yes_points, "no": no_points}
 
+
+def fetch_all_market_trades(condition_id, cancel_flag=None, page_limit=500):
+    """获取某个市场全部链上成交记录（无用户过滤），用于构建完整价格曲线.
+
+    不设上限，持续翻页直到 API 返回空数据或用户取消。
+    通过 cancel_flag["fetch_message"] 向前端报告进度。
+    """
+    all_trades = []
+    offset = 0
+    page = 0
+    while True:
+        if cancel_flag and cancel_flag.get("cancelled"):
+            print(f"市场全部交易获取已取消 (已获取 {len(all_trades)} 条)")
+            break
+
+        # 向前端报告当前进度
+        if cancel_flag is not None:
+            cancel_flag["fetch_message"] = f"获取市场成交数据: 已 {len(all_trades)} 条"
+            # 进度条: 5-45%，对数式增长，多数市场在前10页完成
+            if page < 10:
+                cancel_flag["percent"] = 5 + page * 4  # 5-41% for first 10 pages
+            elif page < 50:
+                cancel_flag["percent"] = 41 + int((page - 10) * 0.15)  # 41-47%
+            else:
+                cancel_flag["percent"] = min(47 + int((page - 50) * 0.05), 49)
+
+        params = {
+            "limit": page_limit,
+            "offset": offset,
+            "market": condition_id,
+        }
+        try:
+            resp = requests.get(TRADES_URL, params=params, timeout=30)
+            if resp.status_code != 200:
+                print(f"获取市场全部交易: HTTP {resp.status_code} (已获取 {len(all_trades)} 条)")
+                break
+            data = resp.json()
+        except requests.RequestException as exc:
+            print(f"获取市场全部交易错误: {exc}")
+            break
+
+        if isinstance(data, dict):
+            batch = data.get("trades", [])
+        elif isinstance(data, list):
+            batch = data
+        else:
+            batch = []
+
+        if not batch:
+            break
+
+        all_trades.extend(batch)
+        print(f"市场全部交易: 第 {page+1} 页 +{len(batch)} 条, 累计 {len(all_trades)} 条")
+
+        if len(batch) < page_limit:
+            break
+        offset += page_limit
+        page += 1
+
+    print(f"市场全部交易: 共获取 {len(all_trades)} 条 ({page + 1} 页)")
+    if cancel_flag is not None:
+        cancel_flag["fetch_message"] = f"市场成交数据获取完成: {len(all_trades)} 条"
+    return all_trades
+
+
+def _decimate_price_points(points):
+    """Remove redundant points for step chart: keep only first+last of each price run."""
+    if len(points) <= 2:
+        return points
+    decimated = [points[0]]
+    for i in range(1, len(points) - 1):
+        prev_p = points[i - 1]["p"]
+        curr_p = points[i]["p"]
+        next_p = points[i + 1]["p"]
+        if curr_p != prev_p or curr_p != next_p:
+            decimated.append(points[i])
+    decimated.append(points[-1])
+    return decimated
+
+
+def build_price_history_from_raw_trades(raw_trades):
+    """从原始 API 交易数据构建价格历史曲线.
+
+    原始数据中的 price 是 0-1 的小数, 这里转为 0-100 的美分.
+    每笔交易同时给出 Yes 和 No 价格, Yes + No = 100.
+    自动减薄冗余点: 连续同价只保留首尾, 保持 step 图表视觉完全一致.
+    """
+    yes_points = []
+    no_points = []
+    for t in raw_trades:
+        try:
+            price = float(t.get("price", 0)) * 100.0
+        except (ValueError, TypeError):
+            continue
+        if price <= 0:
+            continue
+        ts = int(t.get("timestamp", 0))
+        if ts <= 0:
+            continue
+        outcome_idx = t.get("outcomeIndex", 0)
+        if outcome_idx == 0:
+            yes_points.append({"t": ts, "p": round(price, 2)})
+            no_points.append({"t": ts, "p": round(100 - price, 2)})
+        else:
+            yes_points.append({"t": ts, "p": round(100 - price, 2)})
+            no_points.append({"t": ts, "p": round(price, 2)})
+
+    # 按时间排序
+    yes_points.sort(key=lambda x: x["t"])
+    no_points.sort(key=lambda x: x["t"])
+
+    # 减薄冗余点: 连续同价只保留首尾
+    if len(yes_points) > 500:
+        yes_before = len(yes_points)
+        yes_points = _decimate_price_points(yes_points)
+        print(f"价格曲线减薄: Yes {yes_before} → {len(yes_points)} 点")
+    if len(no_points) > 500:
+        no_before = len(no_points)
+        no_points = _decimate_price_points(no_points)
+        print(f"价格曲线减薄: No {no_before} → {len(no_points)} 点")
+
+    return {"yes": yes_points, "no": no_points}
+
+
 # CTF Exchange 合约地址 (需要排除)
 CTF_EXCHANGE_ADDRESSES = {
     "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E".lower(),  # 旧版 Binary
@@ -452,9 +576,9 @@ def batch_get_maker_taker_roles(trades, user_address, cancel_flag=None):
         if cancel_flag:
             if cancel_flag.get("cancelled"):
                 raise CancelledError("用户已中断当前查询")
-            # 更新进度百分比 (Maker/Taker 查询阶段占 20%-80%)
-            progress = batch_start * 60 // len(unique_hashes)  # 0-60
-            cancel_flag["percent"] = 20 + progress  # 20-80
+            # 更新进度百分比 (Maker/Taker 查询阶段占 50%-85%)
+            progress = batch_start * 35 // len(unique_hashes)  # 0-35
+            cancel_flag["percent"] = 50 + progress  # 50-85
         
         batch_hashes = unique_hashes[batch_start:batch_start + batch_size]
         
@@ -1095,10 +1219,13 @@ def run_analysis(market_query, user_address, resolved_arg="AUTO", output_dir=Non
         or event.get("title", "未知市场")
     )
     condition_id = market.get("conditionId") or ""
-    
+
+    # 获取市场全部成交记录用于构建完整价格曲线
+    all_market_trades = fetch_all_market_trades(condition_id, cancel_flag)
+
     # 获取 event_slug 用于 neg-risk 来源分析
     event_slug = event.get("slug", "") if event else ""
-    
+
     # 从 market 数据获取 outcomes 名称和结算状态
     market_outcomes = []
     outcomes_str = market.get("outcomes", "[]")
@@ -1106,14 +1233,14 @@ def run_analysis(market_query, user_address, resolved_arg="AUTO", output_dir=Non
         market_outcomes = json.loads(outcomes_str) if isinstance(outcomes_str, str) else outcomes_str
     except:
         market_outcomes = []
-    
+
     # 结算状态: closed=true 表示已结算
     is_resolved = market.get("closed", False)
-    
+
     # 更新进度: 获取交易数据
     if cancel_flag:
-        cancel_flag["percent"] = 10
-    
+        cancel_flag["percent"] = 45
+
     # 获取交易（先尝试 trades API，失败则用 activity API）
     raw_data, data_source = fetch_trades_with_fallback(condition_id, user_address)
     if not raw_data:
@@ -1377,7 +1504,7 @@ def run_analysis(market_query, user_address, resolved_arg="AUTO", output_dir=Non
             "lastBuyPriceNo": round(last_buy_price_1, 2),
         })
 
-    price_history = build_price_history_from_trades(parsed)
+    price_history = build_price_history_from_raw_trades(all_market_trades)
 
     timeline_file = f"{file_prefix}_timeline.json"
     with open(timeline_file, "w", encoding="utf-8") as f:
@@ -1733,13 +1860,16 @@ def run_analysis_by_condition_id(condition_id, user_address, market_title="未�
     if cancel_flag and cancel_flag.get("cancelled"):
         return None, None, None, "CANCELLED", None
     
+    # 获取市场全部成交记录用于构建完整价格曲线
+    all_market_trades = fetch_all_market_trades(condition_id, cancel_flag)
+
     # 更新进度: 获取交易数据
     if cancel_flag:
-        cancel_flag["percent"] = 10
-    
+        cancel_flag["percent"] = 45
+
     # 获取交易数据（先尝试 trades API，失败则用 activity API）
     raw_data, data_source = fetch_trades_with_fallback(condition_id, user_address)
-    
+
     # v3.27: 即使 trades 为空，也尝试获取链上事件
     chain_events_for_check = []
     if not raw_data and NEG_RISK_MODULE_AVAILABLE:
@@ -2122,7 +2252,7 @@ def run_analysis_by_condition_id(condition_id, user_address, market_title="未�
             "lastBuyPriceNo": round(last_buy_price_1, 2),
         })
 
-    price_history = build_price_history_from_trades(parsed)
+    price_history = build_price_history_from_raw_trades(all_market_trades)
 
     timeline_file = f"{file_prefix}_timeline.json"
     with open(timeline_file, "w", encoding="utf-8") as f:

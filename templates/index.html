@@ -453,7 +453,10 @@
                     document.getElementById('progressFill').style.width = percent + '%';
                     document.getElementById('progressPercent').textContent = percent + '%';
 
-                    if (percent > 0) {
+                    // 显示服务端传来的进度消息（如市场成交数据获取条数）
+                    if (data.fetch_message) {
+                        document.getElementById('progressText').textContent = data.fetch_message;
+                    } else if (percent > 0) {
                         document.getElementById('progressText').textContent = t('simple_progress_analyzing');
                     }
 

@@ -642,6 +642,8 @@ def status(task_id):
         'market': task['market'],
         'address': task['address']
     }
+    if cancel_flag.get('fetch_message'):
+        response['fetch_message'] = cancel_flag['fetch_message']
     
     if task['status'] == 'completed':
         response['result'] = task['result']

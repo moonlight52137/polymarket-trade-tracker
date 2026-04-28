@@ -852,6 +852,10 @@
                         const percent = data.percent || 0;
                         document.getElementById('progressFill').style.width = percent + '%';
 
+                        if (data.fetch_message) {
+                            document.getElementById('batchProgressInfo').textContent = data.fetch_message;
+                        }
+
                         if (data.status === 'completed') {
                             clearInterval(interval);
                             resolve({...data.result, task_id: taskId});
