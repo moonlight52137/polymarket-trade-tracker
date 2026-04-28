@@ -857,22 +857,79 @@ def write_stats_report(
 # ---------------------------------------------------
 # DATA FETCHING
 # ---------------------------------------------------
+def _looks_like_slug(query):
+    """判断查询是否像 Polymarket event slug (如 nba-orl-ind-2025-12-31)."""
+    return bool(re.match(r'^[a-z0-9]+(-[a-z0-9]+){2,}$', query.strip()))
+
+
+def search_event_by_slug(slug):
+    """通过 event slug 精确查找赛事, 返回 (event, market)."""
+    try:
+        resp = requests.get(
+            "https://gamma-api.polymarket.com/events",
+            params={"slug": slug.strip().lower()},
+            timeout=15
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, list) and len(data) > 0:
+            event = data[0]
+            markets = event.get("markets") or []
+            if markets:
+                print(f"[slug 搜索] 找到赛事: {event.get('title', 'N/A')} ({len(markets)} 个子市场)")
+                return event, markets[0]
+    except Exception as e:
+        print(f"slug 搜索失败: {e}")
+    return None, None
+
+
 def search_market(query):
-    """Return (event, market) for the first matching search result."""
+    """Return (event, market) for the first matching search result.
+
+    优先在 public-search 结果中精确匹配 slug, 若未命中且 query 形似 slug,
+    则回退到 events?slug= 精确查询.
+    """
+    event, market = None, None
+
+    # Step 1: public-search
     try:
         resp = requests.get(SEARCH_URL, params={"q": query}, timeout=10)
         resp.raise_for_status()
         data = resp.json()
     except requests.RequestException as exc:
         print(f"搜索市场错误: {exc}")
-        return None, None
+        data = {}
 
     events = data.get("events", []) if isinstance(data, dict) else []
-    for event in events:
-        markets = event.get("markets") or []
-        if markets:
-            return event, markets[0]
-    return None, None
+
+    if events:
+        # 优先匹配 slug 完全一致的 event
+        query_lower = query.strip().lower()
+        for ev in events:
+            if ev.get("slug", "").lower() == query_lower:
+                markets = ev.get("markets") or []
+                if markets:
+                    event, market = ev, markets[0]
+                    break
+
+        # 否则取第一个有市场的 event
+        if not market:
+            for ev in events:
+                markets = ev.get("markets") or []
+                if markets:
+                    event, market = ev, markets[0]
+                    break
+
+    # Step 2: 如果 query 形似 slug 但搜索结果中没有精确匹配,
+    #         用 events?slug= 精确查询 (public-search 对 slug 的召回率低)
+    if _looks_like_slug(query) and not (
+        market and event and event.get("slug", "").lower() == query.strip().lower()
+    ):
+        slug_event, slug_market = search_event_by_slug(query)
+        if slug_market:
+            event, market = slug_event, slug_market
+
+    return event, market
 
 
 def fetch_trades(condition_id, user_address, page_limit=500):
