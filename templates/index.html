@@ -99,6 +99,59 @@
             from { opacity: 1; transform: translateY(0); }
             to { opacity: 0; transform: translateY(-10px); }
         }
+        /* 自定义交易详情浮动框 */
+        .trade-detail-popup {
+            position: absolute;
+            z-index: 9999;
+            background: rgba(26, 26, 46, 0.97);
+            border: 1px solid rgba(99, 102, 241, 0.5);
+            border-radius: 10px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6);
+            padding: 14px 16px;
+            font-size: 13px;
+            line-height: 1.8;
+            color: #e2e8f0;
+            pointer-events: auto;
+            min-width: 280px;
+            max-width: 360px;
+            transition: opacity 0.15s ease;
+            backdrop-filter: blur(12px);
+        }
+        .trade-detail-popup.hidden {
+            display: none;
+        }
+        .trade-detail-popup .close-btn {
+            position: absolute;
+            top: 6px;
+            right: 10px;
+            cursor: pointer;
+            color: #9ca3af;
+            font-size: 16px;
+            line-height: 1;
+            padding: 2px 6px;
+            border-radius: 4px;
+            transition: all 0.15s;
+            background: none;
+            border: none;
+        }
+        .trade-detail-popup .close-btn:hover {
+            color: #fff;
+            background: rgba(255,255,255,0.1);
+        }
+        .trade-detail-popup .detail-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+        }
+        .trade-detail-popup .detail-divider {
+            border: none;
+            border-top: 1px solid rgba(255,255,255,0.1);
+            margin: 6px 0;
+        }
+        .trade-detail-popup .pos-yes { color: #4ade80; }
+        .trade-detail-popup .pos-no { color: #f87171; }
+        .trade-detail-popup .trade-buy { color: #00c800; }
+        .trade-detail-popup .trade-sell { color: #ff4444; }
     </style>
 </head>
 <body class="bg-dark-900 min-h-screen text-white">
@@ -254,6 +307,19 @@
             </div>
 
             <p class="mt-4 text-sm text-gray-500 text-center" data-i18n="simple_hint">输入市场名称和钱包地址，获取完整的交易分析报告</p>
+
+            <!-- 最近查询记录 -->
+            <div id="recentQueries" class="mt-4 hidden">
+                <div class="flex items-center gap-2 mb-2">
+                    <svg class="w-4 h-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                    <span class="text-xs text-gray-500">最近查询</span>
+                </div>
+                <div id="recentQueriesList" class="flex flex-wrap gap-2">
+                    <!-- 动态填充 -->
+                </div>
+            </div>
         </div>
 
         <!-- 进度显示 -->
@@ -346,7 +412,13 @@
                     <span class="text-xs text-gray-500 font-normal ml-2">（悬停查看交易详情 · 滑块按时间索引）</span>
                 </h3>
                 <!-- ECharts 图表 -->
-                <div id="echartContainer" style="width:100%;height:420px;"></div>
+                <div style="position:relative;">
+                    <div id="echartContainer" style="width:100%;height:420px;"></div>
+                    <div id="tradeDetailPopup" class="trade-detail-popup hidden">
+                        <button class="close-btn" onclick="closeTradeDetailPopup()" title="关闭">&times;</button>
+                        <div id="tradeDetailContent"></div>
+                    </div>
+                </div>
             </div>
 
             <!-- 时间线滑块 -->
@@ -358,7 +430,17 @@
                         </svg>
                         <span>时间线索引</span>
                     </h3>
-                    <span id="tradeIndexLabel" class="text-sm text-gray-400">第 0 / 0 笔</span>
+                    <div class="flex items-center gap-3">
+                        <label id="detailToggleLabel" class="flex items-center gap-2 cursor-pointer select-none">
+                            <span class="text-xs text-primary font-medium">自动展示交易详情</span>
+                            <div class="relative">
+                                <input type="checkbox" id="detailToggle" checked class="sr-only peer">
+                                <div class="w-9 h-5 bg-dark-600 rounded-full peer-checked:bg-primary/60 transition-colors"></div>
+                                <div class="absolute top-0.5 left-0.5 w-4 h-4 bg-gray-400 rounded-full peer-checked:translate-x-4 peer-checked:bg-primary transition-transform"></div>
+                            </div>
+                        </label>
+                        <span id="tradeIndexLabel" class="text-sm text-gray-400">第 0 / 0 笔</span>
+                    </div>
                 </div>
                 <input type="range" id="tradeSlider"
                        min="0" max="0" value="0" step="1"
@@ -382,6 +464,71 @@
     <script>
         let currentTaskId = null;
         let pollInterval = null;
+
+        // ---- 最近查询记录 ----
+        const RECENT_QUERIES_KEY = 'pm_recent_queries';
+        const MAX_RECENT = 5;
+
+        function loadRecentQueries() {
+            var container = document.getElementById('recentQueries');
+            var listEl = document.getElementById('recentQueriesList');
+            if (!container || !listEl) return;
+            try {
+                var raw = localStorage.getItem(RECENT_QUERIES_KEY);
+                if (!raw) { container.classList.add('hidden'); return; }
+                var queries = JSON.parse(raw);
+                if (!Array.isArray(queries) || queries.length === 0) { container.classList.add('hidden'); return; }
+                container.classList.remove('hidden');
+                listEl.innerHTML = queries.map(function(q, i) {
+                    var label = (q.market || '').substring(0, 30) + ' · ' + (q.address || '').substring(0, 10);
+                    return '<button onclick="fillRecentQuery(' + i + ')" ' +
+                        'class="px-3 py-1.5 bg-dark-800 border border-dark-600 rounded-lg text-xs text-gray-400 hover:text-white hover:border-primary/50 transition-colors text-left max-w-xs truncate" ' +
+                        'title="' + escAttr(q.market) + ' | ' + escAttr(q.address) + '">' +
+                        escHtml(label) + '</button>';
+                }).join('');
+            } catch(e) {
+                container.classList.add('hidden');
+            }
+        }
+
+        function saveRecentQuery(market, address) {
+            if (!market || !address) return;
+            try {
+                var raw = localStorage.getItem(RECENT_QUERIES_KEY);
+                var queries = raw ? JSON.parse(raw) : [];
+                if (!Array.isArray(queries)) queries = [];
+                // Remove duplicates
+                queries = queries.filter(function(q) { return q.market !== market || q.address !== address; });
+                queries.unshift({ market: market, address: address });
+                if (queries.length > MAX_RECENT) queries = queries.slice(0, MAX_RECENT);
+                localStorage.setItem(RECENT_QUERIES_KEY, JSON.stringify(queries));
+                loadRecentQueries();
+            } catch(e) {}
+        }
+
+        function fillRecentQuery(index) {
+            try {
+                var raw = localStorage.getItem(RECENT_QUERIES_KEY);
+                if (!raw) return;
+                var queries = JSON.parse(raw);
+                if (!queries || index >= queries.length) return;
+                var q = queries[index];
+                document.getElementById('market').value = q.market || '';
+                document.getElementById('address').value = q.address || '';
+            } catch(e) {}
+        }
+
+        function escHtml(s) {
+            if (!s) return '';
+            return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        }
+        function escAttr(s) {
+            if (!s) return '';
+            return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        }
+
+        // 页面加载时渲染最近查询
+        loadRecentQueries();
 
         function showError(message) {
             const errorEl = document.getElementById('errorMessage');
@@ -462,6 +609,11 @@
 
                     if (data.status === 'completed') {
                         clearInterval(pollInterval);
+                        // 保存到最近查询
+                        saveRecentQuery(
+                            document.getElementById('market').value.trim(),
+                            document.getElementById('address').value.trim()
+                        );
                         showResult(data.result);
                     } else if (data.status === 'error' || data.status === 'cancelled') {
                         clearInterval(pollInterval);
@@ -1108,9 +1260,8 @@
                     borderColor: '#6366f1',
                     borderWidth: 1,
                     textStyle: { color: '#e2e8f0', fontSize: 12 },
-                    extraCssText: 'border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.4);z-index:9999;',
+                    extraCssText: 'border-radius:8px;box-shadow:0 4px 20px rgba(0,0,0,0.4);z-index:9998;',
                     confine: true,
-                    alwaysShowContent: true,
                 },
                 legend: {
                     data: ['Yes 价格', 'No 价格', '买入 ' + out0, '卖出 ' + out0, '买入 ' + out1, '卖出 ' + out1],
@@ -1152,10 +1303,9 @@
                         data: phYes.map(function(ph) { return [ph.t * 1000, ph.p]; }),
                         smooth: false,
                         step: 'end',
-                        symbol: 'circle',
-                        symbolSize: 5,
-                        itemStyle: { color: '#4ade80' },
-                        lineStyle: { color: '#4ade80', width: 1.5, opacity: 0.8 },
+                        showSymbol: false,
+                        itemStyle: { color: '#22c55e' },
+                        lineStyle: { color: '#22c55e', width: 1, opacity: 0.35 },
                         z: 1,
                         animation: false,
                         large: true,
@@ -1167,10 +1317,9 @@
                         data: phNo.map(function(ph) { return [ph.t * 1000, ph.p]; }),
                         smooth: false,
                         step: 'end',
-                        symbol: 'circle',
-                        symbolSize: 5,
-                        itemStyle: { color: '#f87171' },
-                        lineStyle: { color: '#f87171', width: 1.5, opacity: 0.8 },
+                        showSymbol: false,
+                        itemStyle: { color: '#ef4444' },
+                        lineStyle: { color: '#ef4444', width: 1, opacity: 0.35 },
                         z: 1,
                         animation: false,
                         large: true,
@@ -1297,10 +1446,27 @@
                 if (origIdx >= 0 && origIdx < trades.length) {
                     document.getElementById('tradeSlider').value = origIdx;
                     updateSliderStyle(origIdx, trades.length);
+                    updateTradeDetail(origIdx, trades);
                     updatePositionPanel(origIdx, trades);
                     highlightTrade(origIdx);
                 }
             });
+
+            // 详情开关事件
+            var detailToggleEl = document.getElementById('detailToggle');
+            if (detailToggleEl) {
+                detailToggleEl.addEventListener('change', function() {
+                    var slider = document.getElementById('tradeSlider');
+                    var idx = parseInt(slider.value);
+                    updateTradeDetail(idx, trades);
+                    // 同步更新开关标签样式
+                    var label = document.getElementById('detailToggleLabel');
+                    if (label) {
+                        var span = label.querySelector('span:first-child');
+                        if (span) span.textContent = this.checked ? '自动展示交易详情' : '交易详情已关闭';
+                    }
+                });
+            }
 
             // 初始化滑块
             const slider = document.getElementById('tradeSlider');
@@ -1309,6 +1475,7 @@
             slider.addEventListener('input', function() {
                 const idx = parseInt(this.value);
                 updateSliderStyle(idx, trades.length);
+                updateTradeDetail(idx, trades);
                 updatePositionPanel(idx, trades);
                 highlightTrade(idx);
             });
@@ -1316,12 +1483,23 @@
             // 初始显示最后一笔
             const lastIdx = trades.length - 1;
             updateSliderStyle(lastIdx, trades.length);
+            updateTradeDetail(lastIdx, trades);
             updatePositionPanel(lastIdx, trades);
             highlightTrade(lastIdx);
 
-            // 窗口缩放重置图表
+            // 窗口缩放重置图表并重定位弹窗
             window.addEventListener('resize', function() {
-                if (echartInstance) echartInstance.resize();
+                if (echartInstance) {
+                    echartInstance.resize();
+                    // 重定位弹窗
+                    var popup = document.getElementById('tradeDetailPopup');
+                    if (popup && !popup.classList.contains('hidden') && timelineData) {
+                        var slider = document.getElementById('tradeSlider');
+                        var idx = parseInt(slider.value);
+                        var t = timelineData.trades[idx];
+                        if (t) positionPopupNearMarker(t);
+                    }
+                }
             });
 
             // 键盘导航
@@ -1343,6 +1521,7 @@
 
                 slider.value = idx;
                 updateSliderStyle(idx, trades.length);
+                updateTradeDetail(idx, trades);
                 updatePositionPanel(idx, trades);
                 highlightTrade(idx);
             });
@@ -1486,13 +1665,108 @@
                     z: 100,
                 }],
             });
+        }
 
-            // 自动显示 tooltip (在价格曲线上)
-            echartInstance.dispatchAction({
-                type: 'showTip',
-                seriesIndex: 0,
-                dataIndex: idx,
-            });
+        function updateTradeDetail(idx, trades) {
+            var toggle = document.getElementById('detailToggle');
+            var popup = document.getElementById('tradeDetailPopup');
+            if (!popup || !echartInstance) return;
+
+            if (toggle && !toggle.checked) {
+                popup.classList.add('hidden');
+                return;
+            }
+
+            var t = trades[idx];
+            if (!t) { popup.classList.add('hidden'); return; }
+
+            // 填充交易详情内容
+            var dt = formatTimestamp(t.timestamp * 1000);
+            var on0 = timelineData.outcome0Name;
+            var on1 = timelineData.outcome1Name;
+            document.getElementById('tradeDetailContent').innerHTML =
+                '<b>#' + t.seq + '</b> ' + dt + '<br/>' +
+                '<span class="' + (t.type === 'Buy' ? 'trade-buy' : 'trade-sell') + '">' + t.type + '</span> ' +
+                t.side + ' &middot; ' + t.shares.toFixed(2) + ' 份 @ ' + t.price.toFixed(2) + '&cent;<br/>' +
+                '成本: $' + t.cost.toFixed(2) + ' &middot; 角色: ' + t.makerTaker + ' &middot; 来源: ' + t.source +
+                '<hr class="detail-divider"/>' +
+                '<span class="pos-yes">' + on0 + '</span> 持仓: ' + t.yesPosition.toFixed(2) + ' 份 ' +
+                '均买: ' + (t.avgBuyPriceYes > 0 ? t.avgBuyPriceYes.toFixed(1) + '&cent;' : '-') +
+                ' 最后买: ' + (t.lastBuyPriceYes > 0 ? t.lastBuyPriceYes.toFixed(1) + '&cent;' : '-') + '<br/>' +
+                '<span class="pos-no">' + on1 + '</span> 持仓: ' + t.noPosition.toFixed(2) + ' 份 ' +
+                '均买: ' + (t.avgBuyPriceNo > 0 ? t.avgBuyPriceNo.toFixed(1) + '&cent;' : '-') +
+                ' 最后买: ' + (t.lastBuyPriceNo > 0 ? t.lastBuyPriceNo.toFixed(1) + '&cent;' : '-');
+
+            popup.classList.remove('hidden');
+
+            // 定位弹窗到选中交易标记附近
+            positionPopupNearMarker(t);
+        }
+
+        function positionPopupNearMarker(t) {
+            var popup = document.getElementById('tradeDetailPopup');
+            var container = document.getElementById('echartContainer');
+            if (!popup || !container || !echartInstance) return;
+
+            // 将交易数据坐标转换为图表容器内的像素坐标
+            var pixel = echartInstance.convertToPixel({ xAxisIndex: 0, yAxisIndex: 0 }, [t.timestamp * 1000, t.price]);
+            if (!pixel) { return; }
+
+            var markerX = pixel[0];
+            var markerY = pixel[1];
+            var chartW = echartInstance.getWidth();
+            var chartH = echartInstance.getHeight();
+            var popupW = popup.offsetWidth;
+            var popupH = popup.offsetHeight;
+
+            // 如果没有有效尺寸，稍后重试
+            if (popupW === 0 || popupH === 0) {
+                setTimeout(function() { positionPopupNearMarker(t); }, 50);
+                return;
+            }
+
+            var margin = 12;
+
+            // 判断标记所在的象限，将弹窗放到对角的相反象限，远离标记
+            var midX = chartW / 2;
+            var midY = chartH / 2;
+            var markerInRight = markerX > midX;
+            var markerInBottom = markerY > midY;
+
+            var left, top;
+
+            if (!markerInRight && !markerInBottom) {
+                // 标记在左上 → 弹窗放右下
+                left = chartW - popupW - margin;
+                top = chartH - popupH - margin;
+            } else if (markerInRight && !markerInBottom) {
+                // 标记在右上 → 弹窗放左下
+                left = margin;
+                top = chartH - popupH - margin;
+            } else if (!markerInRight && markerInBottom) {
+                // 标记在左下 → 弹窗放右上
+                left = chartW - popupW - margin;
+                top = margin;
+            } else {
+                // 标记在右下 → 弹窗放左上
+                left = margin;
+                top = margin;
+            }
+
+            // 确保不超出容器边界
+            left = Math.max(margin, Math.min(left, chartW - popupW - margin));
+            top = Math.max(margin, Math.min(top, chartH - popupH - margin));
+
+            popup.style.left = left + 'px';
+            popup.style.top = top + 'px';
+        }
+
+        function closeTradeDetailPopup() {
+            var popup = document.getElementById('tradeDetailPopup');
+            if (popup) popup.classList.add('hidden');
+            // 同时关闭自动展示开关
+            var toggle = document.getElementById('detailToggle');
+            if (toggle) toggle.checked = false;
         }
 
         function updatePositionPanel(idx, trades) {
